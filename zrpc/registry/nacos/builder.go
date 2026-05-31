@@ -69,18 +69,25 @@ func (b *builder) Build(url resolver.Target, conn resolver.ClientConn, opts reso
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	pipe := make(chan []string)
+	pipe := make(chan []string, 1)
 
-	go cli.Subscribe(&vo.SubscribeParam{
+	subParam := vo.SubscribeParam{
 		ServiceName:       tgt.Service,
 		Clusters:          tgt.Clusters,
 		GroupName:         tgt.GroupName,
-		SubscribeCallback: newWatcher(ctx, cancel, pipe).CallBackHandle, // required
-	})
+		SubscribeCallback: newWatcher(ctx, pipe).CallBackHandle,
+	}
+
+	go cli.Subscribe(&subParam)
 
 	go populateEndpoints(ctx, conn, pipe)
 
-	return &resolvr{cancelFunc: cancel}, nil
+	return &resolvr{
+		cancelFunc: cancel,
+		cli:        cli,
+		subParam:   subParam,
+		pipe:       pipe,
+	}, nil
 }
 
 // Scheme returns the scheme supported by this resolver.

@@ -5,35 +5,47 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
 	"github.com/nacos-group/nacos-sdk-go/v2/common/logger"
 	"github.com/nacos-group/nacos-sdk-go/v2/model"
+	"github.com/nacos-group/nacos-sdk-go/v2/vo"
 	"github.com/zeromicro/go-zero/core/logx"
 	"google.golang.org/grpc/resolver"
 )
 
 type resolvr struct {
-	cancelFunc context.CancelFunc
+	cancelFunc  context.CancelFunc
+	cli         naming_client.INamingClient
+	subParam    vo.SubscribeParam
+	pipe        chan []string
 }
 
 func (r *resolvr) ResolveNow(resolver.ResolveNowOptions) {}
 
-// Close closes the resolver.
+// Close closes the resolver, unsubscribes from Nacos, shuts down the naming
+// client, and drains the internal pipe channel so the watcher goroutine can't
+// block on a send after the consumer has stopped.
 func (r *resolvr) Close() {
 	r.cancelFunc()
+	_ = r.cli.Unsubscribe(&r.subParam)
+	r.cli.CloseClient()
+	// drain so any in-flight CallBackHandle send doesn't block forever
+	for {
+		select {
+		case <-r.pipe:
+		default:
+			return
+		}
+	}
 }
 
 type watcher struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	out    chan<- []string
+	ctx context.Context
+	out chan<- []string
 }
 
-func newWatcher(ctx context.Context, cancel context.CancelFunc, out chan<- []string) *watcher {
-	return &watcher{
-		ctx:    ctx,
-		cancel: cancel,
-		out:    out,
-	}
+func newWatcher(ctx context.Context, out chan<- []string) *watcher {
+	return &watcher{ctx: ctx, out: out}
 }
 
 func (nw *watcher) CallBackHandle(services []model.Instance, err error) {
@@ -49,7 +61,10 @@ func (nw *watcher) CallBackHandle(services []model.Instance, err error) {
 			ee = append(ee, fmt.Sprintf("%s:%d", s.Ip, s.Port))
 		}
 	}
-	nw.out <- ee
+	select {
+	case nw.out <- ee:
+	case <-nw.ctx.Done():
+	}
 }
 
 func populateEndpoints(ctx context.Context, clientConn resolver.ClientConn, input <-chan []string) {
