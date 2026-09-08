@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
-	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
 	"github.com/nacos-group/nacos-sdk-go/v2/common/logger"
 	"github.com/nacos-group/nacos-sdk-go/v2/model"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
@@ -14,10 +14,14 @@ import (
 )
 
 type resolvr struct {
-	cancelFunc  context.CancelFunc
-	cli         naming_client.INamingClient
-	subParam    vo.SubscribeParam
-	pipe        chan []string
+	cancelFunc context.CancelFunc
+	cli        interface {
+		Unsubscribe(*vo.SubscribeParam) error
+		CloseClient()
+	}
+	subParam  vo.SubscribeParam
+	pipe      chan []string
+	closeOnce sync.Once
 }
 
 func (r *resolvr) ResolveNow(resolver.ResolveNowOptions) {}
@@ -26,17 +30,19 @@ func (r *resolvr) ResolveNow(resolver.ResolveNowOptions) {}
 // client, and drains the internal pipe channel so the watcher goroutine can't
 // block on a send after the consumer has stopped.
 func (r *resolvr) Close() {
-	r.cancelFunc()
-	_ = r.cli.Unsubscribe(&r.subParam)
-	r.cli.CloseClient()
-	// drain so any in-flight CallBackHandle send doesn't block forever
-	for {
-		select {
-		case <-r.pipe:
-		default:
-			return
+	r.closeOnce.Do(func() {
+		r.cancelFunc()
+		_ = r.cli.Unsubscribe(&r.subParam)
+		r.cli.CloseClient()
+		// drain so any in-flight CallBackHandle send doesn't block forever
+		for {
+			select {
+			case <-r.pipe:
+			default:
+				return
+			}
 		}
-	}
+	})
 }
 
 type watcher struct {
